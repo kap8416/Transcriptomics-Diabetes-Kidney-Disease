@@ -1,0 +1,106 @@
+1. Get Data
+
+##Download your data to your local computer or server before loading it into your R session
+#Use getGEO() to get phenotype data from the entire experiment, and create your datMeta.
+gse <- getGEO("GSE30529",GSEMatrix =TRUE,getGPL=FALSE)
+datMeta <- pData(gse[[1]])
+rownames(datMeta) <- datMeta[,2]
+idx1 <- which(datMeta$source_name_ch1 == "Tubuli of DKD kidney")
+idx2 <- which(datMeta$source_name_ch1 == "Tubuli of control kidney")
+idx <- c(idx1, idx2)
+
+
+##Next, simply use ReadAffy() to read in your samples from your directory.
+data.affy <- ReadAffy(celfile.path = "C:/users/lcz/Documents/GSE30529/")
+datExpr <- exprs(data.affy)
+datMeta <- datMeta[idx,]
+
+##Finally, check datMeta/datExpr ordering and reformat as necessary.
+GSM <- rownames(pData(data.affy))
+GSM <- substr(GSM,1,9)
+idx <- match(GSM, datMeta$geo_accession)
+datMeta <- datMeta[idx,] 
+colnames(datExpr)=rownames(datMeta) 
+colnames(datMeta)[8] <- ("Dx") 
+datMeta$Dx <- gsub("Tubuli of DKD kidney","DKD",datMeta$Dx)
+datMeta$Dx <- gsub("Tubuli of control kidney","CTL",datMeta$Dx)
+datMeta$Dx <- as.factor(datMeta$Dx)
+
+
+2. QC on Raw Data
+datExpr <- log2(datExpr)
+dim(datExpr)
+
+3. Normalization
+datExpr <- rma(data.affy, background=T, normalize=T, verbose=T)
+datExpr <- exprs(datExpr)
+
+
+4. Batch Correction
+batch <- protocolData(data.affy)$ScanDate
+batch <- substr(batch,1,8)
+batch <- as.factor(batch)
+batch <- as.factor(batch)
+table(batch)
+datMeta$Batch <- batch
+datMeta_proc <- new("AnnotatedDataFrame",data=datMeta)
+colnames(datExpr) <- rownames(datMeta)
+datAll <- new("ExpressionSet",exprs=datExpr,phenoData=datMeta_proc)
+to_remove <- (pData(datAll)$Batch == "03/05/10")
+datAll <- datAll[,!to_remove]
+pData(datAll)$Batch <- droplevels(pData(datAll)$Batch)
+mod <- model.matrix(~pData(datAll)$Dx)   
+batch <- as.factor(pData(datAll)$Batch)
+datExpr.combat <- ComBat(dat = exprs(datAll),batch = batch,mod = mod)
+exprs(datAll) <- datExpr.combat
+
+5. Outlier Removal
+tree <- hclust(dist(t(exprs(datAll))), method="average")
+plot(tree)
+
+normadj <- (0.5 + 0.5*bicor(exprs(datAll)))^2
+netsummary <- fundamentalNetworkConcepts(normadj)
+C <- netsummary$Connectivity
+Z.C <- (C-mean(C))/sqrt(var(C))
+
+datLabel <- pData(datAll)$Dx
+plot(1:length(Z.C),Z.C,main="Outlier Plot",xlab = "Samples",ylab="Connectivity Z Score")
+text(1:length(Z.C),Z.C,label=datLabel,pos=3,cex=0.6)
+abline(h= -2, col="red")
+
+to_keep <- abs(Z.C) < 2
+table(to_keep)
+colnames(exprs(datAll))[!to_keep]
+
+datAll <- datAll[,to_keep]
+
+6. Annotating Probes
+ensembl = useEnsembl(biomart="ensembl", dataset="hsapiens_gene_ensembl")
+identifier <- "affy_hg_u133a_2"
+getinfo <- c("affy_hg_u133a_2", "ensembl_gene_id", "entrezgene_id", "external_gene_name")
+geneDat <- getBM(attributes = getinfo, filters=identifier, values = rownames(exprs(datAll)),mart=ensembl)
+idx <- match(rownames(exprs(datAll)),geneDat$affy_hg_u133a_2)
+geneDat <- geneDat[idx,]
+table(is.na(geneDat$ensembl_gene_id))
+to_keep <- (is.na(geneDat$ensembl_gene_id) == FALSE)
+geneDat <- geneDat[to_keep,]
+datAll <- datAll[to_keep,]
+
+7. Collapse Rows
+table(duplicated(geneDat$affy_hg_u133a_2))
+table(duplicated(geneDat$ensembl_gene_id))
+CR <- collapseRows(exprs(datAll), rowGroup = geneDat$ensembl_gene_id, rowID = geneDat$affy_hg_u133a_2)
+CRdata <- CR$datETcollapsed
+idx <- match(CR$group2row[,"selectedRowID"], geneDat$affy_hg_u133a)
+geneDat <- geneDat[idx,]
+rownames(geneDat) <- geneDat$ensembl_gene_id 
+
+8. Differential Expression Analysis
+mod <- model.matrix(~pData(datAll)$Dx)
+fit <- lmFit(CRdata,mod)
+fit <- eBayes(fit)
+tt <- topTable(fit,coef = 2,n = Inf,genelist = geneDat)
+
+
+
+
